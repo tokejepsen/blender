@@ -45,6 +45,7 @@
 #include "bpy_capi_utils.h"
 #include "bpy_intern_string.h"
 #include "bpy_path.h"
+#include "bpy_props.h"
 #include "bpy_rna.h"
 #include "bpy_traceback.h"
 
@@ -304,6 +305,7 @@ static struct _inittab bpy_internal_modules[] = {
     {NULL, NULL},
 };
 
+#ifndef WITH_PYTHON_MODULE
 /**
  * Convenience function for #BPY_python_start.
  *
@@ -321,6 +323,7 @@ static void pystatus_exit_on_error(PyStatus status)
     Py_ExitStatusException(status);
   }
 }
+#endif
 
 /* call BPY_context_set first */
 void BPY_python_start(bContext *C, int argc, const char **argv)
@@ -419,16 +422,19 @@ void BPY_python_start(bContext *C, int argc, const char **argv)
     /* Allow to use our own included Python. `py_path_bundle` may be NULL. */
     {
       const char *py_path_bundle = BKE_appdir_folder_id(BLENDER_SYSTEM_PYTHON, NULL);
-#  ifdef __APPLE__
-      /* OSX allow file/directory names to contain : character (represented as / in the Finder)
-       * but current Python lib (release 3.1.1) doesn't handle these correctly */
-      if (strchr(py_path_bundle, ':')) {
-        fprintf(stderr,
-                "Warning! Blender application is located in a path containing ':' or '/' chars\n"
-                "This may make python import function fail\n");
-      }
-#  endif
       if (py_path_bundle != NULL) {
+
+#  ifdef __APPLE__
+        /* Mac-OS allows file/directory names to contain `:` character
+         * (represented as `/` in the Finder) but current Python lib (as of release 3.1.1)
+         * doesn't handle these correctly. */
+        if (strchr(py_path_bundle, ':')) {
+          fprintf(stderr,
+                  "Warning! Blender application is located in a path containing ':' or '/' chars\n"
+                  "This may make python import function fail\n");
+        }
+#  endif /* __APPLE__ */
+
         status = PyConfig_SetBytesString(&config, &config.home, py_path_bundle);
         pystatus_exit_on_error(status);
       }
@@ -517,6 +523,9 @@ void BPY_python_end(void)
 
   /* finalizing, no need to grab the state, except when we are a module */
   gilstate = PyGILState_Ensure();
+
+  /* Decrement user counts of all callback functions. */
+  BPY_rna_props_clear_all();
 
   /* free other python data. */
   pyrna_free_types();

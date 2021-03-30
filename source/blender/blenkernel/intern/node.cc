@@ -107,6 +107,9 @@ static void node_free_node(bNodeTree *ntree, bNode *node);
 static void node_socket_interface_free(bNodeTree *UNUSED(ntree),
                                        bNodeSocket *sock,
                                        const bool do_id_user);
+static void nodeMuteRerouteOutputLinks(struct bNodeTree *ntree,
+                                       struct bNode *node,
+                                       const bool mute);
 
 static void ntree_init_data(ID *id)
 {
@@ -367,6 +370,36 @@ static void node_foreach_cache(ID *id,
   }
 }
 
+static ID *node_owner_get(Main *bmain, ID *id)
+{
+  if ((id->flag & LIB_EMBEDDED_DATA) == 0) {
+    return id;
+  }
+  /* TODO: Sort this NO_MAIN or not for embedded node trees. See T86119. */
+  // BLI_assert((id->tag & LIB_TAG_NO_MAIN) == 0);
+
+  ListBase *lists[] = {&bmain->materials,
+                       &bmain->lights,
+                       &bmain->worlds,
+                       &bmain->textures,
+                       &bmain->scenes,
+                       &bmain->linestyles,
+                       &bmain->simulations,
+                       nullptr};
+
+  bNodeTree *ntree = (bNodeTree *)id;
+  for (int i = 0; lists[i] != nullptr; i++) {
+    LISTBASE_FOREACH (ID *, id_iter, lists[i]) {
+      if (ntreeFromID(id_iter) == ntree) {
+        return id_iter;
+      }
+    }
+  }
+
+  BLI_assert(!"Embedded node tree with no owner. Critical Main inconsistency.");
+  return nullptr;
+}
+
 static void write_node_socket_default_value(BlendWriter *writer, bNodeSocket *sock)
 {
   if (sock->default_value == nullptr) {
@@ -405,7 +438,7 @@ static void write_node_socket_default_value(BlendWriter *writer, bNodeSocket *so
     case SOCK_CUSTOM:
     case SOCK_SHADER:
     case SOCK_GEOMETRY:
-      BLI_assert(false);
+      BLI_assert_unreachable();
       break;
   }
 }
@@ -508,20 +541,14 @@ void ntreeBlendWrite(BlendWriter *writer, bNodeTree *ntree)
         }
         BLO_write_struct_by_name(writer, node->typeinfo->storagename, node->storage);
       }
-      else if ((ntree->type == NTREE_COMPOSIT) && (node->type == CMP_NODE_CRYPTOMATTE)) {
+      else if ((ntree->type == NTREE_COMPOSIT) &&
+               (ELEM(node->type, CMP_NODE_CRYPTOMATTE, CMP_NODE_CRYPTOMATTE_LEGACY))) {
         NodeCryptomatte *nc = (NodeCryptomatte *)node->storage;
-        /* Update the matte_id so the files can be opened in versions that don't
-         * use `CryptomatteEntry`. */
-        MEM_SAFE_FREE(nc->matte_id);
-        nc->matte_id = BKE_cryptomatte_entries_to_matte_id(nc);
-        if (nc->matte_id) {
-          BLO_write_string(writer, nc->matte_id);
-        }
+        BLO_write_string(writer, nc->matte_id);
         LISTBASE_FOREACH (CryptomatteEntry *, entry, &nc->entries) {
           BLO_write_struct(writer, CryptomatteEntry, entry);
         }
         BLO_write_struct_by_name(writer, node->typeinfo->storagename, node->storage);
-        MEM_SAFE_FREE(nc->matte_id);
       }
       else if (node->type == FN_NODE_INPUT_STRING) {
         NodeInputString *storage = (NodeInputString *)node->storage;
@@ -680,10 +707,12 @@ void ntreeBlendReadData(BlendDataReader *reader, bNodeTree *ntree)
           iuser->scene = nullptr;
           break;
         }
+        case CMP_NODE_CRYPTOMATTE_LEGACY:
         case CMP_NODE_CRYPTOMATTE: {
           NodeCryptomatte *nc = (NodeCryptomatte *)node->storage;
           BLO_read_data_address(reader, &nc->matte_id);
           BLO_read_list(reader, &nc->entries);
+          BLI_listbase_clear(&nc->runtime.layers);
           break;
         }
         case TEX_NODE_IMAGE: {
@@ -748,6 +777,13 @@ static void ntree_blend_read_data(BlendDataReader *reader, ID *id)
 static void lib_link_node_socket(BlendLibReader *reader, Library *lib, bNodeSocket *sock)
 {
   IDP_BlendReadLib(reader, sock->prop);
+
+  /* This can happen for all socket types when a file is saved in an older version of Blender than
+   * it was originally created in (T86298). Some socket types still require a default value. The
+   * default value of those sockets will be created in `ntreeSetTypes`. */
+  if (sock->default_value == nullptr) {
+    return;
+  }
 
   switch ((eNodeSocketDatatype)sock->type) {
     case SOCK_OBJECT: {
@@ -880,7 +916,8 @@ void ntreeBlendReadExpand(BlendExpander *expander, bNodeTree *ntree)
   }
 
   LISTBASE_FOREACH (bNode *, node, &ntree->nodes) {
-    if (node->id && node->type != CMP_NODE_R_LAYERS) {
+    if (node->id && !(node->type == CMP_NODE_R_LAYERS) &&
+        !(node->type == CMP_NODE_CRYPTOMATTE && node->custom1 == CMP_CRYPTOMATTE_SRC_RENDER)) {
       BLO_expand(expander, node->id);
     }
 
@@ -916,6 +953,7 @@ IDTypeInfo IDType_ID_NT = {
     /* make_local */ nullptr,
     /* foreach_id */ node_foreach_id,
     /* foreach_cache */ node_foreach_cache,
+    /* owner_get */ node_owner_get,
 
     /* blend_write */ ntree_blend_write,
     /* blend_read_data */ ntree_blend_read_data,
@@ -1333,7 +1371,9 @@ GHashIterator *nodeSocketTypeGetIterator(void)
   return BLI_ghashIterator_new(nodesockettypes_hash);
 }
 
-struct bNodeSocket *nodeFindSocket(const bNode *node, int in_out, const char *identifier)
+struct bNodeSocket *nodeFindSocket(const bNode *node,
+                                   eNodeSocketInOut in_out,
+                                   const char *identifier)
 {
   const ListBase *sockets = (in_out == SOCK_IN) ? &node->inputs : &node->outputs;
   LISTBASE_FOREACH (bNodeSocket *, sock, sockets) {
@@ -1490,7 +1530,7 @@ void nodeModifySocketType(
 
 bNodeSocket *nodeAddSocket(bNodeTree *ntree,
                            bNode *node,
-                           int in_out,
+                           eNodeSocketInOut in_out,
                            const char *idname,
                            const char *identifier,
                            const char *name)
@@ -1512,7 +1552,7 @@ bNodeSocket *nodeAddSocket(bNodeTree *ntree,
 
 bNodeSocket *nodeInsertSocket(bNodeTree *ntree,
                               bNode *node,
-                              int in_out,
+                              eNodeSocketInOut in_out,
                               const char *idname,
                               bNodeSocket *next_sock,
                               const char *identifier,
@@ -1544,6 +1584,8 @@ const char *nodeStaticSocketType(int type, int subtype)
           return "NodeSocketFloatAngle";
         case PROP_TIME:
           return "NodeSocketFloatTime";
+        case PROP_DISTANCE:
+          return "NodeSocketFloatDistance";
         case PROP_NONE:
         default:
           return "NodeSocketFloat";
@@ -1613,6 +1655,8 @@ const char *nodeStaticSocketInterfaceType(int type, int subtype)
           return "NodeSocketInterfaceFloatAngle";
         case PROP_TIME:
           return "NodeSocketInterfaceFloatTime";
+        case PROP_DISTANCE:
+          return "NodeSocketInterfaceFloatDistance";
         case PROP_NONE:
         default:
           return "NodeSocketInterfaceFloat";
@@ -1669,7 +1713,7 @@ const char *nodeStaticSocketInterfaceType(int type, int subtype)
 
 bNodeSocket *nodeAddStaticSocket(bNodeTree *ntree,
                                  bNode *node,
-                                 int in_out,
+                                 eNodeSocketInOut in_out,
                                  int type,
                                  int subtype,
                                  const char *identifier,
@@ -1689,7 +1733,7 @@ bNodeSocket *nodeAddStaticSocket(bNodeTree *ntree,
 
 bNodeSocket *nodeInsertStaticSocket(bNodeTree *ntree,
                                     bNode *node,
-                                    int in_out,
+                                    eNodeSocketInOut in_out,
                                     int type,
                                     int subtype,
                                     bNodeSocket *next_sock,
@@ -2183,6 +2227,106 @@ void nodeRemLink(bNodeTree *ntree, bNodeLink *link)
   }
 }
 
+/* Check if all output links are muted or not. */
+static bool nodeMuteFromSocketLinks(const bNodeTree *ntree, const bNodeSocket *sock)
+{
+  int tot = 0;
+  int muted = 0;
+  LISTBASE_FOREACH (const bNodeLink *, link, &ntree->links) {
+    if (link->fromsock == sock) {
+      tot++;
+      if (link->flag & NODE_LINK_MUTED) {
+        muted++;
+      }
+    }
+  }
+  return tot == muted;
+}
+
+static void nodeMuteLink(bNodeLink *link)
+{
+  link->flag |= NODE_LINK_MUTED;
+  link->flag |= NODE_LINK_TEST;
+  if (!(link->tosock->flag & SOCK_MULTI_INPUT)) {
+    link->tosock->flag &= ~SOCK_IN_USE;
+  }
+}
+
+static void nodeUnMuteLink(bNodeLink *link)
+{
+  link->flag &= ~NODE_LINK_MUTED;
+  link->flag |= NODE_LINK_TEST;
+  link->tosock->flag |= SOCK_IN_USE;
+}
+
+/* Upstream muting. Always happens when unmuting but checks when muting. O(n^2) algorithm.*/
+static void nodeMuteRerouteInputLinks(bNodeTree *ntree, bNode *node, const bool mute)
+{
+  if (node->type != NODE_REROUTE) {
+    return;
+  }
+  if (!mute || nodeMuteFromSocketLinks(ntree, (bNodeSocket *)node->outputs.first)) {
+    bNodeSocket *sock = (bNodeSocket *)node->inputs.first;
+    LISTBASE_FOREACH (bNodeLink *, link, &ntree->links) {
+      if (!(link->flag & NODE_LINK_VALID) || (link->tosock != sock)) {
+        continue;
+      }
+      if (mute) {
+        nodeMuteLink(link);
+      }
+      else {
+        nodeUnMuteLink(link);
+      }
+      nodeMuteRerouteInputLinks(ntree, link->fromnode, mute);
+    }
+  }
+}
+
+/* Downstream muting propagates when reaching reroute nodes. O(n^2) algorithm.*/
+static void nodeMuteRerouteOutputLinks(bNodeTree *ntree, bNode *node, const bool mute)
+{
+  if (node->type != NODE_REROUTE) {
+    return;
+  }
+  bNodeSocket *sock;
+  sock = (bNodeSocket *)node->outputs.first;
+  LISTBASE_FOREACH (bNodeLink *, link, &ntree->links) {
+    if (!(link->flag & NODE_LINK_VALID) || (link->fromsock != sock)) {
+      continue;
+    }
+    if (mute) {
+      nodeMuteLink(link);
+    }
+    else {
+      nodeUnMuteLink(link);
+    }
+    nodeMuteRerouteOutputLinks(ntree, link->tonode, mute);
+  }
+}
+
+void nodeMuteLinkToggle(bNodeTree *ntree, bNodeLink *link)
+{
+  if (link->tosock) {
+    bool mute = !(link->flag & NODE_LINK_MUTED);
+    if (mute) {
+      nodeMuteLink(link);
+    }
+    else {
+      nodeUnMuteLink(link);
+    }
+    if (link->tonode->type == NODE_REROUTE) {
+      nodeMuteRerouteOutputLinks(ntree, link->tonode, mute);
+    }
+    if (link->fromnode->type == NODE_REROUTE) {
+      nodeMuteRerouteInputLinks(ntree, link->fromnode, mute);
+    }
+  }
+
+  if (ntree) {
+    ntree->update |= NTREE_UPDATE_LINKS;
+  }
+}
+
 void nodeRemSocketLinks(bNodeTree *ntree, bNodeSocket *sock)
 {
   LISTBASE_FOREACH_MUTABLE (bNodeLink *, link, &ntree->links) {
@@ -2223,6 +2367,10 @@ void nodeInternalRelink(bNodeTree *ntree, bNode *node)
            */
           if (!(fromlink->flag & NODE_LINK_VALID)) {
             link->flag &= ~NODE_LINK_VALID;
+          }
+
+          if (fromlink->flag & NODE_LINK_MUTED) {
+            link->flag |= NODE_LINK_MUTED;
           }
 
           ntree->update |= NTREE_UPDATE_LINKS;
@@ -2471,7 +2619,7 @@ static void node_preview_init_tree_recursive(bNodeInstanceHash *previews,
                                              bNodeInstanceKey parent_key,
                                              int xsize,
                                              int ysize,
-                                             int create)
+                                             bool create_previews)
 {
   LISTBASE_FOREACH (bNode *, node, &ntree->nodes) {
     bNodeInstanceKey key = BKE_node_instance_key(parent_key, ntree, node);
@@ -2480,16 +2628,17 @@ static void node_preview_init_tree_recursive(bNodeInstanceHash *previews,
       node->preview_xsize = xsize;
       node->preview_ysize = ysize;
 
-      BKE_node_preview_verify(previews, key, xsize, ysize, create);
+      BKE_node_preview_verify(previews, key, xsize, ysize, create_previews);
     }
 
     if (node->type == NODE_GROUP && node->id) {
-      node_preview_init_tree_recursive(previews, (bNodeTree *)node->id, key, xsize, ysize, create);
+      node_preview_init_tree_recursive(
+          previews, (bNodeTree *)node->id, key, xsize, ysize, create_previews);
     }
   }
 }
 
-void BKE_node_preview_init_tree(bNodeTree *ntree, int xsize, int ysize, int create_previews)
+void BKE_node_preview_init_tree(bNodeTree *ntree, int xsize, int ysize, bool create_previews)
 {
   if (!ntree) {
     return;
@@ -2980,29 +3129,6 @@ bNodeTree *ntreeFromID(ID *id)
   return (nodetree != nullptr) ? *nodetree : nullptr;
 }
 
-/* Finds and returns the datablock that privately owns the given tree, or null. */
-ID *BKE_node_tree_find_owner_ID(Main *bmain, struct bNodeTree *ntree)
-{
-  ListBase *lists[] = {&bmain->materials,
-                       &bmain->lights,
-                       &bmain->worlds,
-                       &bmain->textures,
-                       &bmain->scenes,
-                       &bmain->linestyles,
-                       &bmain->simulations,
-                       nullptr};
-
-  for (int i = 0; lists[i] != nullptr; i++) {
-    LISTBASE_FOREACH (ID *, id, lists[i]) {
-      if (ntreeFromID(id) == ntree) {
-        return id;
-      }
-    }
-  }
-
-  return nullptr;
-}
-
 bool ntreeNodeExists(const bNodeTree *ntree, const bNode *testnode)
 {
   LISTBASE_FOREACH (const bNode *, node, &ntree->nodes) {
@@ -3103,7 +3229,7 @@ void ntreeLocalMerge(Main *bmain, bNodeTree *localtree, bNodeTree *ntree)
 /* ************ NODE TREE INTERFACE *************** */
 
 static bNodeSocket *make_socket_interface(bNodeTree *ntree,
-                                          int in_out,
+                                          eNodeSocketInOut in_out,
                                           const char *idname,
                                           const char *name)
 {
@@ -3139,7 +3265,9 @@ static bNodeSocket *make_socket_interface(bNodeTree *ntree,
   return sock;
 }
 
-bNodeSocket *ntreeFindSocketInterface(bNodeTree *ntree, int in_out, const char *identifier)
+bNodeSocket *ntreeFindSocketInterface(bNodeTree *ntree,
+                                      eNodeSocketInOut in_out,
+                                      const char *identifier)
 {
   ListBase *sockets = (in_out == SOCK_IN) ? &ntree->inputs : &ntree->outputs;
   LISTBASE_FOREACH (bNodeSocket *, iosock, sockets) {
@@ -3151,7 +3279,7 @@ bNodeSocket *ntreeFindSocketInterface(bNodeTree *ntree, int in_out, const char *
 }
 
 bNodeSocket *ntreeAddSocketInterface(bNodeTree *ntree,
-                                     int in_out,
+                                     eNodeSocketInOut in_out,
                                      const char *idname,
                                      const char *name)
 {
@@ -3167,8 +3295,11 @@ bNodeSocket *ntreeAddSocketInterface(bNodeTree *ntree,
   return iosock;
 }
 
-bNodeSocket *ntreeInsertSocketInterface(
-    bNodeTree *ntree, int in_out, const char *idname, bNodeSocket *next_sock, const char *name)
+bNodeSocket *ntreeInsertSocketInterface(bNodeTree *ntree,
+                                        eNodeSocketInOut in_out,
+                                        const char *idname,
+                                        bNodeSocket *next_sock,
+                                        const char *name)
 {
   bNodeSocket *iosock = make_socket_interface(ntree, in_out, idname, name);
   if (in_out == SOCK_IN) {
@@ -3187,7 +3318,7 @@ struct bNodeSocket *ntreeAddSocketInterfaceFromSocket(bNodeTree *ntree,
                                                       bNodeSocket *from_sock)
 {
   bNodeSocket *iosock = ntreeAddSocketInterface(
-      ntree, from_sock->in_out, from_sock->idname, from_sock->name);
+      ntree, static_cast<eNodeSocketInOut>(from_sock->in_out), from_sock->idname, from_sock->name);
   if (iosock) {
     if (iosock->typeinfo->interface_from_socket) {
       iosock->typeinfo->interface_from_socket(ntree, iosock, from_node, from_sock);
@@ -3202,7 +3333,11 @@ struct bNodeSocket *ntreeInsertSocketInterfaceFromSocket(bNodeTree *ntree,
                                                          bNodeSocket *from_sock)
 {
   bNodeSocket *iosock = ntreeInsertSocketInterface(
-      ntree, from_sock->in_out, from_sock->idname, next_sock, from_sock->name);
+      ntree,
+      static_cast<eNodeSocketInOut>(from_sock->in_out),
+      from_sock->idname,
+      next_sock,
+      from_sock->name);
   if (iosock) {
     if (iosock->typeinfo->interface_from_socket) {
       iosock->typeinfo->interface_from_socket(ntree, iosock, from_node, from_sock);
@@ -3546,7 +3681,8 @@ void nodeSetActive(bNodeTree *ntree, bNode *node)
         tnode->flag &= ~NODE_ACTIVE_ID;
       }
     }
-    if (node->typeinfo->nclass == NODE_CLASS_TEXTURE) {
+    if ((node->typeinfo->nclass == NODE_CLASS_TEXTURE) ||
+        (node->typeinfo->type == GEO_NODE_ATTRIBUTE_SAMPLE_TEXTURE)) {
       tnode->flag &= ~NODE_ACTIVE_TEXTURE;
     }
   }
@@ -3555,7 +3691,8 @@ void nodeSetActive(bNodeTree *ntree, bNode *node)
   if (node->id) {
     node->flag |= NODE_ACTIVE_ID;
   }
-  if (node->typeinfo->nclass == NODE_CLASS_TEXTURE) {
+  if ((node->typeinfo->nclass == NODE_CLASS_TEXTURE) ||
+      (node->typeinfo->type == GEO_NODE_ATTRIBUTE_SAMPLE_TEXTURE)) {
     node->flag |= NODE_ACTIVE_TEXTURE;
   }
 }
@@ -4002,7 +4139,9 @@ void ntreeTagUsedSockets(bNodeTree *ntree)
 
   LISTBASE_FOREACH (bNodeLink *, link, &ntree->links) {
     link->fromsock->flag |= SOCK_IN_USE;
-    link->tosock->flag |= SOCK_IN_USE;
+    if (!(link->flag & NODE_LINK_MUTED)) {
+      link->tosock->flag |= SOCK_IN_USE;
+    }
   }
 }
 
@@ -4471,18 +4610,18 @@ void node_type_group_update(struct bNodeType *ntype,
 }
 
 void node_type_exec(struct bNodeType *ntype,
-                    NodeInitExecFunction initexecfunc,
-                    NodeFreeExecFunction freeexecfunc,
-                    NodeExecFunction execfunc)
+                    NodeInitExecFunction init_exec_fn,
+                    NodeFreeExecFunction free_exec_fn,
+                    NodeExecFunction exec_fn)
 {
-  ntype->initexecfunc = initexecfunc;
-  ntype->freeexecfunc = freeexecfunc;
-  ntype->execfunc = execfunc;
+  ntype->init_exec_fn = init_exec_fn;
+  ntype->free_exec_fn = free_exec_fn;
+  ntype->exec_fn = exec_fn;
 }
 
-void node_type_gpu(struct bNodeType *ntype, NodeGPUExecFunction gpufunc)
+void node_type_gpu(struct bNodeType *ntype, NodeGPUExecFunction gpu_fn)
 {
-  ntype->gpufunc = gpufunc;
+  ntype->gpu_fn = gpu_fn;
 }
 
 void node_type_internal_links(bNodeType *ntype,
@@ -4572,6 +4711,7 @@ static void registerCompositNodes()
   register_node_type_cmp_defocus();
   register_node_type_cmp_sunbeams();
   register_node_type_cmp_denoise();
+  register_node_type_cmp_antialiasing();
 
   register_node_type_cmp_valtorgb();
   register_node_type_cmp_rgbtobw();
@@ -4599,6 +4739,7 @@ static void registerCompositNodes()
   register_node_type_cmp_keyingscreen();
   register_node_type_cmp_keying();
   register_node_type_cmp_cryptomatte();
+  register_node_type_cmp_cryptomatte_legacy();
 
   register_node_type_cmp_translate();
   register_node_type_cmp_rotate();
@@ -4781,21 +4922,33 @@ static void registerGeometryNodes()
   register_node_type_geo_group();
 
   register_node_type_geo_align_rotation_to_vector();
+  register_node_type_geo_attribute_clamp();
   register_node_type_geo_attribute_color_ramp();
   register_node_type_geo_attribute_combine_xyz();
   register_node_type_geo_attribute_compare();
+  register_node_type_geo_attribute_convert();
   register_node_type_geo_attribute_fill();
+  register_node_type_geo_attribute_map_range();
   register_node_type_geo_attribute_math();
   register_node_type_geo_attribute_mix();
   register_node_type_geo_attribute_proximity();
   register_node_type_geo_attribute_randomize();
   register_node_type_geo_attribute_separate_xyz();
   register_node_type_geo_attribute_vector_math();
+  register_node_type_geo_attribute_remove();
   register_node_type_geo_boolean();
   register_node_type_geo_collection_info();
   register_node_type_geo_edge_split();
   register_node_type_geo_is_viewport();
   register_node_type_geo_join_geometry();
+  register_node_type_geo_mesh_primitive_circle();
+  register_node_type_geo_mesh_primitive_cone();
+  register_node_type_geo_mesh_primitive_cube();
+  register_node_type_geo_mesh_primitive_cylinder();
+  register_node_type_geo_mesh_primitive_grid();
+  register_node_type_geo_mesh_primitive_ico_sphere();
+  register_node_type_geo_mesh_primitive_line();
+  register_node_type_geo_mesh_primitive_uv_sphere();
   register_node_type_geo_object_info();
   register_node_type_geo_point_distribute();
   register_node_type_geo_point_instance();
@@ -4805,8 +4958,8 @@ static void registerGeometryNodes()
   register_node_type_geo_point_translate();
   register_node_type_geo_points_to_volume();
   register_node_type_geo_sample_texture();
+  register_node_type_geo_subdivide();
   register_node_type_geo_subdivision_surface();
-  register_node_type_geo_subdivision_surface_simple();
   register_node_type_geo_transform();
   register_node_type_geo_triangulate();
   register_node_type_geo_volume_to_mesh();
@@ -4815,14 +4968,10 @@ static void registerGeometryNodes()
 static void registerFunctionNodes()
 {
   register_node_type_fn_boolean_math();
-  register_node_type_fn_combine_strings();
   register_node_type_fn_float_compare();
-  register_node_type_fn_group_instance_id();
   register_node_type_fn_input_string();
   register_node_type_fn_input_vector();
-  register_node_type_fn_object_transforms();
   register_node_type_fn_random_float();
-  register_node_type_fn_switch();
 }
 
 void BKE_node_system_init(void)

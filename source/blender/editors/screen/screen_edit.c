@@ -1413,8 +1413,8 @@ ScrArea *ED_screen_state_toggle(bContext *C, wmWindow *win, ScrArea *area, const
     screen = screen_state_to_nonnormal(C, win, toggle_area, state);
   }
 
-  /* XXX bad code: setscreen() ends with first area active. fullscreen render assumes this too */
-  CTX_wm_area_set(C, screen->areabase.first);
+  BLI_assert(CTX_wm_screen(C) == screen);
+  BLI_assert(CTX_wm_area(C) == NULL); /* May have been freed. */
 
   return screen->areabase.first;
 }
@@ -1441,7 +1441,16 @@ ScrArea *ED_screen_temp_space_open(bContext *C,
 
   switch (display_type) {
     case USER_TEMP_SPACE_DISPLAY_WINDOW:
-      if (WM_window_open_temp(C, title, x, y, sizex, sizey, (int)space_type, dialog)) {
+      if (WM_window_open(C,
+                         title,
+                         x,
+                         y,
+                         sizex,
+                         sizey,
+                         (int)space_type,
+                         dialog,
+                         true,
+                         WIN_ALIGN_LOCATION_CENTER)) {
         area = CTX_wm_area(C);
       }
       break;

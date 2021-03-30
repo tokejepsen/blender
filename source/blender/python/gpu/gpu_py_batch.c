@@ -38,11 +38,12 @@
 
 #include "../generic/py_capi_utils.h"
 
-#include "gpu_py_api.h"
-#include "gpu_py_batch.h" /* own include */
+#include "gpu_py.h"
 #include "gpu_py_element.h"
 #include "gpu_py_shader.h"
 #include "gpu_py_vertex_buffer.h"
+
+#include "gpu_py_batch.h" /* own include */
 
 /* -------------------------------------------------------------------- */
 /** \name Utility Functions
@@ -69,50 +70,44 @@ static PyObject *pygpu_batch__tp_new(PyTypeObject *UNUSED(type), PyObject *args,
 
   const char *exc_str_missing_arg = "GPUBatch.__new__() missing required argument '%s' (pos %d)";
 
-  struct {
-    GPUPrimType type_id;
-    BPyGPUVertBuf *py_vertbuf;
-    BPyGPUIndexBuf *py_indexbuf;
-  } params = {GPU_PRIM_NONE, NULL, NULL};
+  struct PyC_StringEnum prim_type = {bpygpu_primtype_items, GPU_PRIM_NONE};
+  BPyGPUVertBuf *py_vertbuf = NULL;
+  BPyGPUIndexBuf *py_indexbuf = NULL;
 
   static const char *_keywords[] = {"type", "buf", "elem", NULL};
   static _PyArg_Parser _parser = {"|$O&O!O!:GPUBatch.__new__", _keywords, 0};
   if (!_PyArg_ParseTupleAndKeywordsFast(args,
                                         kwds,
                                         &_parser,
-                                        bpygpu_ParsePrimType,
-                                        &params.type_id,
+                                        PyC_ParseStringEnum,
+                                        &prim_type,
                                         &BPyGPUVertBuf_Type,
-                                        &params.py_vertbuf,
+                                        &py_vertbuf,
                                         &BPyGPUIndexBuf_Type,
-                                        &params.py_indexbuf)) {
+                                        &py_indexbuf)) {
     return NULL;
   }
 
-  if (params.type_id == GPU_PRIM_NONE) {
-    PyErr_Format(PyExc_TypeError, exc_str_missing_arg, _keywords[0], 1);
-    return NULL;
-  }
+  BLI_assert(prim_type.value_found != GPU_PRIM_NONE);
 
-  if (params.py_vertbuf == NULL) {
+  if (py_vertbuf == NULL) {
     PyErr_Format(PyExc_TypeError, exc_str_missing_arg, _keywords[1], 2);
     return NULL;
   }
 
-  GPUBatch *batch = GPU_batch_create(params.type_id,
-                                     params.py_vertbuf->buf,
-                                     params.py_indexbuf ? params.py_indexbuf->elem : NULL);
+  GPUBatch *batch = GPU_batch_create(
+      prim_type.value_found, py_vertbuf->buf, py_indexbuf ? py_indexbuf->elem : NULL);
 
   BPyGPUBatch *ret = (BPyGPUBatch *)BPyGPUBatch_CreatePyObject(batch);
 
 #ifdef USE_GPU_PY_REFERENCES
-  ret->references = PyList_New(params.py_indexbuf ? 2 : 1);
-  PyList_SET_ITEM(ret->references, 0, (PyObject *)params.py_vertbuf);
-  Py_INCREF(params.py_vertbuf);
+  ret->references = PyList_New(py_indexbuf ? 2 : 1);
+  PyList_SET_ITEM(ret->references, 0, (PyObject *)py_vertbuf);
+  Py_INCREF(py_vertbuf);
 
-  if (params.py_indexbuf != NULL) {
-    PyList_SET_ITEM(ret->references, 1, (PyObject *)params.py_indexbuf);
-    Py_INCREF(params.py_indexbuf);
+  if (py_indexbuf != NULL) {
+    PyList_SET_ITEM(ret->references, 1, (PyObject *)py_indexbuf);
+    Py_INCREF(py_indexbuf);
   }
 
   PyObject_GC_Track(ret);
@@ -284,8 +279,8 @@ static void pygpu_batch__tp_dealloc(BPyGPUBatch *self)
   GPU_batch_discard(self->batch);
 
 #ifdef USE_GPU_PY_REFERENCES
+  PyObject_GC_UnTrack(self);
   if (self->references) {
-    PyObject_GC_UnTrack(self);
     pygpu_batch__tp_clear(self);
     Py_XDECREF(self->references);
   }
@@ -300,18 +295,10 @@ PyDoc_STRVAR(
     "\n"
     "   Reusable container for drawable geometry.\n"
     "\n"
-    "   :arg type: One of these primitive types: {\n"
-    "       `POINTS`,\n"
-    "       `LINES`,\n"
-    "       `TRIS`,\n"
-    "       `LINE_STRIP`,\n"
-    "       `LINE_LOOP`,\n"
-    "       `TRI_STRIP`,\n"
-    "       `TRI_FAN`,\n"
-    "       `LINES_ADJ`,\n"
-    "       `TRIS_ADJ`,\n"
-    "       `LINE_STRIP_ADJ` }\n"
-    "   :type type: `str`\n"
+    "   :arg type: The primitive type of geometry to be drawn.\n"
+    "      Possible values are `POINTS`, `LINES`, `TRIS`, `LINE_STRIP`, `LINE_LOOP`, `TRI_STRIP`, "
+    "`TRI_FAN`, `LINES_ADJ`, `TRIS_ADJ` and `LINE_STRIP_ADJ`.\n"
+    "   :type type: str\n"
     "   :arg buf: Vertex buffer containing all or some of the attributes required for drawing.\n"
     "   :type buf: :class:`gpu.types.GPUVertBuf`\n"
     "   :arg elem: An optional index buffer.\n"

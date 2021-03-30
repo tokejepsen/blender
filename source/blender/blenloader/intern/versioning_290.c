@@ -27,6 +27,7 @@
 #include "BLI_utildefines.h"
 
 #include "DNA_anim_types.h"
+#include "DNA_armature_types.h"
 #include "DNA_brush_types.h"
 #include "DNA_cachefile_types.h"
 #include "DNA_collection_types.h"
@@ -36,6 +37,7 @@
 #include "DNA_gpencil_modifier_types.h"
 #include "DNA_gpencil_types.h"
 #include "DNA_hair_types.h"
+#include "DNA_light_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
@@ -51,6 +53,7 @@
 
 #include "BKE_animsys.h"
 #include "BKE_armature.h"
+#include "BKE_attribute.h"
 #include "BKE_collection.h"
 #include "BKE_colortools.h"
 #include "BKE_cryptomatte.h"
@@ -62,6 +65,7 @@
 #include "BKE_multires.h"
 #include "BKE_node.h"
 
+#include "IMB_imbuf.h"
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.h"
@@ -69,6 +73,8 @@
 #include "SEQ_proxy.h"
 #include "SEQ_render.h"
 #include "SEQ_sequencer.h"
+#include "SEQ_time.h"
+#include "SEQ_transform.h"
 
 #include "BLO_readfile.h"
 #include "readfile.h"
@@ -97,6 +103,15 @@ static eSpaceSeq_Proxy_RenderSize get_sequencer_render_size(Main *bmain)
   }
 
   return render_size;
+}
+
+static bool can_use_proxy(const Sequence *seq, int psize)
+{
+  if (seq->strip->proxy == NULL) {
+    return false;
+  }
+  short size_flags = seq->strip->proxy->build_size_flags;
+  return (seq->flag & SEQ_USE_PROXY) != 0 && psize != IMB_PROXY_NONE && (size_flags & psize) != 0;
 }
 
 /* image_size is width or height depending what RNA property is converted - X or Y. */
@@ -147,7 +162,7 @@ static void seq_convert_transform_crop(const Scene *scene,
     image_size_x = s_elem->orig_width;
     image_size_y = s_elem->orig_height;
 
-    if (SEQ_can_use_proxy(seq, SEQ_rendersize_to_proxysize(render_size))) {
+    if (can_use_proxy(seq, SEQ_rendersize_to_proxysize(render_size))) {
       image_size_x /= SEQ_rendersize_to_scale_factor(render_size);
       image_size_y /= SEQ_rendersize_to_scale_factor(render_size);
     }
@@ -280,7 +295,7 @@ static void seq_convert_transform_crop_2(const Scene *scene,
   int image_size_x = s_elem->orig_width;
   int image_size_y = s_elem->orig_height;
 
-  if (SEQ_can_use_proxy(seq, SEQ_rendersize_to_proxysize(render_size))) {
+  if (can_use_proxy(seq, SEQ_rendersize_to_proxysize(render_size))) {
     image_size_x /= SEQ_rendersize_to_scale_factor(render_size);
     image_size_y /= SEQ_rendersize_to_scale_factor(render_size);
   }
@@ -329,6 +344,37 @@ static void seq_convert_transform_crop_lb_2(const Scene *scene,
     if (seq->type == SEQ_TYPE_META) {
       seq_convert_transform_crop_lb_2(scene, &seq->seqbase, render_size);
     }
+  }
+}
+
+static void seq_update_meta_disp_range(Editing *ed)
+{
+  if (ed == NULL) {
+    return;
+  }
+
+  LISTBASE_FOREACH_BACKWARD (MetaStack *, ms, &ed->metastack) {
+    /* Update ms->disp_range from meta. */
+    if (ms->disp_range[0] == ms->disp_range[1]) {
+      copy_v2_v2_int(ms->disp_range, &ms->parseq->startdisp);
+    }
+
+    /* Update meta strip endpoints. */
+    SEQ_transform_set_left_handle_frame(ms->parseq, ms->disp_range[0]);
+    SEQ_transform_set_right_handle_frame(ms->parseq, ms->disp_range[1]);
+    SEQ_transform_fix_single_image_seq_offsets(ms->parseq);
+
+    /* Recalculate effects using meta strip. */
+    LISTBASE_FOREACH (Sequence *, seq, ms->oldbasep) {
+      if (seq->seq2) {
+        seq->start = seq->startdisp = max_ii(seq->seq1->startdisp, seq->seq2->startdisp);
+        seq->enddisp = min_ii(seq->seq1->enddisp, seq->seq2->enddisp);
+      }
+    }
+
+    /* Ensure that active seqbase points to active meta strip seqbase. */
+    MetaStack *active_ms = SEQ_meta_stack_active_get(ed);
+    SEQ_seqbase_active_set(ed, &active_ms->parseq->seqbase);
   }
 }
 
@@ -606,6 +652,10 @@ void do_versions_after_linking_290(Main *bmain, ReportList *UNUSED(reports))
    */
   {
     /* Keep this block, even when empty. */
+
+    LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
+      seq_update_meta_disp_range(SEQ_editing_get(scene, false));
+    }
   }
 }
 
@@ -757,6 +807,26 @@ static void version_node_join_geometry_for_multi_input_socket(bNodeTree *ntree)
       nodeRemoveSocket(ntree, node, socket->next);
     }
   }
+}
+
+static ARegion *do_versions_add_region_if_not_found(ListBase *regionbase,
+                                                    int region_type,
+                                                    const char *name,
+                                                    int link_after_region_type)
+{
+  ARegion *link_after_region = NULL;
+  LISTBASE_FOREACH (ARegion *, region, regionbase) {
+    if (region->regiontype == region_type) {
+      return NULL;
+    }
+    if (region->regiontype == link_after_region_type) {
+      link_after_region = region;
+    }
+  }
+  ARegion *new_region = MEM_callocN(sizeof(ARegion), name);
+  new_region->regiontype = region_type;
+  BLI_insertlinkafter(regionbase, link_after_region, new_region);
+  return new_region;
 }
 
 /* NOLINTNEXTLINE: readability-function-size */
@@ -1425,14 +1495,13 @@ void blo_do_versions_290(FileData *fd, Library *UNUSED(lib), Main *bmain)
       LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
         if (scene->nodetree) {
           LISTBASE_FOREACH (bNode *, node, &scene->nodetree->nodes) {
-            if (node->type == CMP_NODE_CRYPTOMATTE) {
+            if (node->type == CMP_NODE_CRYPTOMATTE_LEGACY) {
               NodeCryptomatte *storage = (NodeCryptomatte *)node->storage;
               char *matte_id = storage->matte_id;
               if (matte_id == NULL || strlen(storage->matte_id) == 0) {
                 continue;
               }
-              BKE_cryptomatte_matte_id_to_entries(NULL, storage, storage->matte_id);
-              MEM_SAFE_FREE(storage->matte_id);
+              BKE_cryptomatte_matte_id_to_entries(storage, storage->matte_id);
             }
           }
         }
@@ -1722,16 +1791,7 @@ void blo_do_versions_290(FileData *fd, Library *UNUSED(lib), Main *bmain)
     FOREACH_NODETREE_END;
   }
 
-  /**
-   * Versioning code until next subversion bump goes here.
-   *
-   * \note Be sure to check when bumping the version:
-   * - "versioning_userdef.c", #blo_do_versions_userdef
-   * - "versioning_userdef.c", #do_versions_theme
-   *
-   * \note Keep this message at the bottom of the function.
-   */
-  {
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 9)) {
     if (!DNA_struct_elem_find(fd->filesdna, "SceneEEVEE", "float", "bokeh_overblur")) {
       LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
         scene->eevee.bokeh_neighbor_max = 10.0f;
@@ -1753,6 +1813,148 @@ void blo_do_versions_290(FileData *fd, Library *UNUSED(lib), Main *bmain)
       }
     }
 
+    FOREACH_NODETREE_BEGIN (bmain, ntree, id) {
+      if (ntree->type == NTREE_GEOMETRY) {
+        version_node_socket_name(ntree, GEO_NODE_ATTRIBUTE_PROXIMITY, "Result", "Distance");
+      }
+    }
+    FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 10)) {
+    FOREACH_NODETREE_BEGIN (bmain, ntree, id) {
+      if (ntree->type == NTREE_GEOMETRY) {
+        version_node_socket_name(ntree, GEO_NODE_ATTRIBUTE_PROXIMITY, "Location", "Position");
+      }
+    }
+    FOREACH_NODETREE_END;
+
+    LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
+      /* Fix old scene with too many samples that were not being used.
+       * Now they are properly used and might produce a huge slowdown.
+       * So we clamp to what the old max actual was. */
+      if (scene->eevee.volumetric_shadow_samples > 32) {
+        scene->eevee.volumetric_shadow_samples = 32;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 11)) {
+    LISTBASE_FOREACH (bNodeTree *, ntree, &bmain->nodetrees) {
+      if (ntree->type == NTREE_GEOMETRY) {
+        LISTBASE_FOREACH (bNode *, node, &ntree->nodes) {
+          if (STREQ(node->idname, "GeometryNodeSubdivisionSurfaceSimple")) {
+            STRNCPY(node->idname, "GeometryNodeSubdivide");
+          }
+          if (STREQ(node->idname, "GeometryNodeSubdivisionSurface")) {
+            STRNCPY(node->idname, "GeometryNodeSubdivideSmooth");
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 12)) {
+    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
+      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
+        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
+          switch (sl->spacetype) {
+            case SPACE_SEQ: {
+              SpaceSeq *sseq = (SpaceSeq *)sl;
+              if (ELEM(sseq->render_size,
+                       SEQ_RENDER_SIZE_PROXY_100,
+                       SEQ_RENDER_SIZE_PROXY_75,
+                       SEQ_RENDER_SIZE_PROXY_50,
+                       SEQ_RENDER_SIZE_PROXY_25)) {
+                sseq->flag |= SEQ_USE_PROXIES;
+              }
+              if (sseq->render_size == SEQ_RENDER_SIZE_FULL) {
+                sseq->render_size = SEQ_RENDER_SIZE_PROXY_100;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
+      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
+        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
+          if (sl->spacetype == SPACE_SPREADSHEET) {
+            ListBase *regionbase = (sl == area->spacedata.first) ? &area->regionbase :
+                                                                   &sl->regionbase;
+            ARegion *new_footer = do_versions_add_region_if_not_found(
+                regionbase, RGN_TYPE_FOOTER, "footer for spreadsheet", RGN_TYPE_HEADER);
+            if (new_footer != NULL) {
+              new_footer->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_TOP :
+                                                                        RGN_ALIGN_BOTTOM;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 13)) {
+    LISTBASE_FOREACH (bNodeTree *, ntree, &bmain->nodetrees) {
+      if (ntree->type == NTREE_GEOMETRY) {
+        LISTBASE_FOREACH (bNode *, node, &ntree->nodes) {
+          if (STREQ(node->idname, "GeometryNodeSubdivideSmooth")) {
+            STRNCPY(node->idname, "GeometryNodeSubdivisionSurface");
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 14)) {
+    if (!DNA_struct_elem_find(fd->filesdna, "Light", "float", "diff_fac")) {
+      LISTBASE_FOREACH (Light *, light, &bmain->lights) {
+        light->diff_fac = 1.0f;
+        light->volume_fac = 1.0f;
+      }
+    }
+
+    LISTBASE_FOREACH (bNodeTree *, ntree, &bmain->nodetrees) {
+      if (ntree->type == NTREE_GEOMETRY) {
+        LISTBASE_FOREACH (bNode *, node, &ntree->nodes) {
+          if (node->type == GEO_NODE_ATTRIBUTE_FILL) {
+            node->custom2 = ATTR_DOMAIN_AUTO;
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_ATLEAST(bmain, 293, 15)) {
+    LISTBASE_FOREACH (bNodeTree *, ntree, &bmain->nodetrees) {
+      if (ntree->type == NTREE_GEOMETRY) {
+        LISTBASE_FOREACH (bNode *, node, &ntree->nodes) {
+          if (STREQ(node->idname, "GeometryNodeMeshPlane")) {
+            STRNCPY(node->idname, "GeometryNodeMeshGrid");
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Versioning code until next subversion bump goes here.
+   *
+   * \note Be sure to check when bumping the version:
+   * - "versioning_userdef.c", #blo_do_versions_userdef
+   * - "versioning_userdef.c", #do_versions_theme
+   *
+   * \note Keep this message at the bottom of the function.
+   */
+  {
     /* Keep this block, even when empty. */
+
+    if (!DNA_struct_elem_find(fd->filesdna, "bArmature", "float", "axes_position")) {
+      /* Convert the axes draw position to its old default (tip of bone). */
+      LISTBASE_FOREACH (struct bArmature *, arm, &bmain->armatures) {
+        arm->axes_position = 1.0;
+      }
+    }
   }
 }

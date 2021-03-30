@@ -20,13 +20,15 @@
 
 #include <string>
 
+#include "BKE_cryptomatte.hh"
 #include "BLI_map.hh"
 
 #include "MEM_guardedalloc.h"
 
 /* Forward declarations. */
 struct RenderResult;
-struct StampData;
+
+namespace blender::compositor {
 
 /* Cryptomatte includes hash in its meta data keys. The hash is generated from the render
  * layer/pass name. Compositing happens without the knowledge of the original layer and pass. The
@@ -54,3 +56,20 @@ class MetaData {
   MEM_CXX_CLASS_ALLOC_FUNCS("COM:MetaData")
 #endif
 };
+
+struct MetaDataExtractCallbackData {
+  std::unique_ptr<MetaData> meta_data;
+  std::string hash_key;
+  std::string conversion_key;
+  std::string manifest_key;
+
+  void addMetaData(blender::StringRef key, blender::StringRefNull value);
+  void setCryptomatteKeys(blender::StringRef cryptomatte_layer_name);
+  /* C type callback function (StampCallback). */
+  static void extract_cryptomatte_meta_data(void *_data,
+                                            const char *propname,
+                                            char *propvalue,
+                                            int UNUSED(len));
+};
+
+}  // namespace blender::compositor

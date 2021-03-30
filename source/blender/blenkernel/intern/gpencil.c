@@ -322,6 +322,7 @@ IDTypeInfo IDType_ID_GD = {
     .make_local = NULL,
     .foreach_id = greasepencil_foreach_id,
     .foreach_cache = NULL,
+    .owner_get = NULL,
 
     .blend_write = greasepencil_blend_write,
     .blend_read_data = greasepencil_blend_read_data,
@@ -1662,6 +1663,31 @@ bGPDlayer *BKE_gpencil_layer_active_get(bGPdata *gpd)
   return NULL;
 }
 
+bGPDlayer *BKE_gpencil_layer_get_by_name(bGPdata *gpd, char *name, int first_if_not_found)
+{
+  bGPDlayer *gpl;
+  int i = 0;
+
+  /* error checking */
+  if (ELEM(NULL, gpd, gpd->layers.first)) {
+    return NULL;
+  }
+
+  /* loop over layers until found (assume only one active) */
+  for (gpl = gpd->layers.first; gpl; gpl = gpl->next) {
+    if (STREQ(name, gpl->info)) {
+      return gpl;
+    }
+    i++;
+  }
+
+  /* no such layer */
+  if (first_if_not_found) {
+    return gpd->layers.first;
+  }
+  return NULL;
+}
+
 /**
  * Set active grease pencil layer.
  * \param gpd: Grease pencil data-block
@@ -2418,6 +2444,34 @@ int BKE_gpencil_object_material_index_get(Object *ob, Material *ma)
   }
 
   return -1;
+}
+
+int BKE_gpencil_object_material_index_get_by_name(Object *ob, const char *name)
+{
+  short *totcol = BKE_object_material_len_p(ob);
+  Material *read_ma = NULL;
+  for (short i = 0; i < *totcol; i++) {
+    read_ma = BKE_object_material_get(ob, i + 1);
+    /* Material names are like "MAMaterial.001" */
+    if (STREQ(name, &read_ma->id.name[2])) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+Material *BKE_gpencil_object_material_ensure_by_name(Main *bmain,
+                                                     Object *ob,
+                                                     const char *name,
+                                                     int *r_index)
+{
+  int index = BKE_gpencil_object_material_index_get_by_name(ob, name);
+  if (index != -1) {
+    *r_index = index;
+    return BKE_object_material_get(ob, index + 1);
+  }
+  return BKE_gpencil_object_material_new(bmain, ob, name, r_index);
 }
 
 /**

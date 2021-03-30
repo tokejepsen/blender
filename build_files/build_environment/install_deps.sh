@@ -51,7 +51,7 @@ ARGS=$( \
 getopt \
 -o s:i:t:h \
 --long source:,install:,tmp:,info:,threads:,help,show-deps,no-sudo,no-build,no-confirm,\
-with-all,with-opencollada,with-jack,with-embree,with-oidn,with-nanovdb,\
+with-all,with-opencollada,with-jack,with-pulseaudio,with-embree,with-oidn,with-nanovdb,\
 ver-ocio:,ver-oiio:,ver-llvm:,ver-osl:,ver-osd:,ver-openvdb:,ver-xr-openxr:,\
 force-all,force-python,force-boost,force-tbb,\
 force-ocio,force-openexr,force-oiio,force-llvm,force-osl,force-osd,force-openvdb,\
@@ -156,6 +156,9 @@ ARGUMENTS_INFO="\"COMMAND LINE ARGUMENTS:
 
     --with-jack
         Install the jack libraries.
+
+    --with-pulseaudio
+        Install the pulseaudio libraries.
 
     --ver-ocio=<ver>
         Force version of OCIO library.
@@ -376,10 +379,10 @@ USE_CXX11=true
 CLANG_FORMAT_VERSION_MIN="6.0"
 CLANG_FORMAT_VERSION_MAX="10.0"
 
-PYTHON_VERSION="3.9.1"
+PYTHON_VERSION="3.9.2"
 PYTHON_VERSION_SHORT="3.9"
 PYTHON_VERSION_MIN="3.7"
-PYTHON_VERSION_MAX="3.10"
+PYTHON_VERSION_MAX="3.11"
 PYTHON_VERSION_INSTALLED=$PYTHON_VERSION_SHORT
 PYTHON_FORCE_BUILD=false
 PYTHON_FORCE_REBUILD=false
@@ -526,10 +529,10 @@ ALEMBIC_FORCE_BUILD=false
 ALEMBIC_FORCE_REBUILD=false
 ALEMBIC_SKIP=false
 
-USD_VERSION="20.08"
-USD_VERSION_SHORT="20.08"
+USD_VERSION="21.02"
+USD_VERSION_SHORT="21.02"
 USD_VERSION_MIN="20.05"
-USD_VERSION_MAX="21.00"
+USD_VERSION_MAX="22.00"
 USD_FORCE_BUILD=false
 USD_FORCE_REBUILD=false
 USD_SKIP=false
@@ -720,6 +723,9 @@ while true; do
     ;;
     --with-jack)
       WITH_JACK=true; shift; continue;
+    ;;
+    --with-pulseaudio)
+      WITH_PULSEAUDIO=true; shift; continue;
     ;;
     --ver-ocio)
       OCIO_VERSION="$2"
@@ -985,6 +991,7 @@ fi
 if [ "$WITH_ALL" = true ]; then
   WITH_JACK=true
   WITH_NANOVDB=true
+  WITH_PULSEAUDIO=true
 fi
 
 if [ "$WITH_NANOVDB" = true ]; then
@@ -1732,7 +1739,7 @@ compile_OCIO() {
   fi
 
   # To be changed each time we make edits that would modify the compiled result!
-  ocio_magic=2
+  ocio_magic=3
   _init_ocio
 
   # Force having own builds for the dependencies.
@@ -1802,11 +1809,11 @@ compile_OCIO() {
     make -j$THREADS && make install
 
     # Force linking against static libs
-    rm -f $_inst/lib/*.so*
+    #rm -f $_inst/lib/*.so*
 
     # Additional depencencies
-    cp ext/dist/lib/libtinyxml.a $_inst/lib
-    cp ext/dist/lib/libyaml-cpp.a $_inst/lib
+    #cp ext/dist/lib/libtinyxml.a $_inst/lib
+    #cp ext/dist/lib/libyaml-cpp.a $_inst/lib
 
     make clean
 
@@ -3877,6 +3884,10 @@ install_DEB() {
     fi
   fi
 
+  if [ "$WITH_PULSEAUDIO" = true ]; then
+    _packages="$_packages libpulse-dev"
+  fi
+
   PRINT ""
   install_packages_DEB $_packages
 
@@ -4499,6 +4510,10 @@ install_RPM() {
       _packages="$_packages jack-audio-connection-kit-devel"
     fi
 
+    if [ "$WITH_PULSEAUDIO" = true ]; then
+      _packages="$_packages pulseaudio-libs-devel"
+    fi
+
     PRINT ""
     install_packages_RPM $_packages
 
@@ -4540,6 +4555,10 @@ install_RPM() {
     if [ $? -eq 0 ]; then
       install_packages_RPM $X264_DEV
       X264_USE=true
+    fi
+
+    if [ "$WITH_PULSEAUDIO" = true ]; then
+      _packages="$_packages libpulse-devel"
     fi
 
     if [ "$WITH_ALL" = true ]; then
@@ -5071,6 +5090,10 @@ install_ARCH() {
 
   if [ "$WITH_JACK" = true ]; then
     _packages="$_packages jack2"
+  fi
+
+  if [ "$WITH_PULSEAUDIO" = true ]; then
+    _packages="$_packages libpulse"
   fi
 
   PRINT ""
@@ -5883,6 +5906,14 @@ print_info() {
   if [ "$WITH_JACK" = true ]; then
     _1="-D WITH_JACK=ON"
     _2="-D WITH_JACK_DYNLOAD=ON"
+    PRINT "  $_1"
+    PRINT "  $_2"
+    _buildargs="$_buildargs $_1 $_2"
+  fi
+
+  if [ "$WITH_PULSEAUDIO" = true ]; then
+    _1="-D WITH_PULSEAUDIO=ON"
+    _2="-D WITH_PULSEAUDIO_DYNLOAD=ON"
     PRINT "  $_1"
     PRINT "  $_2"
     _buildargs="$_buildargs $_1 $_2"

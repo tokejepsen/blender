@@ -107,14 +107,15 @@ float node_socket_calculate_height(const bNodeSocket *socket)
   return sock_height;
 }
 
-void node_link_calculate_multi_input_position(const bNodeLink *link, float r[2])
+void node_link_calculate_multi_input_position(const float socket_x,
+                                              const float socket_y,
+                                              const int index,
+                                              const int total_inputs,
+                                              float r[2])
 {
-  float offset = (link->tosock->total_inputs * NODE_MULTI_INPUT_LINK_GAP -
-                  NODE_MULTI_INPUT_LINK_GAP) *
-                 0.5;
-  r[0] = link->tosock->locx - NODE_SOCKSIZE * 0.5f;
-  r[1] = link->tosock->locy - offset +
-         (link->multi_input_socket_index * NODE_MULTI_INPUT_LINK_GAP);
+  float offset = (total_inputs * NODE_MULTI_INPUT_LINK_GAP - NODE_MULTI_INPUT_LINK_GAP) * 0.5;
+  r[0] = socket_x - NODE_SOCKSIZE * 0.5f;
+  r[1] = socket_y - offset + (index * NODE_MULTI_INPUT_LINK_GAP);
 }
 
 static void compo_tag_output_nodes(bNodeTree *nodetree, int recalc_flags)
@@ -722,7 +723,7 @@ void ED_node_set_active(Main *bmain, bNodeTree *ntree, bNode *node, bool *r_acti
           }
         }
 
-        LISTBASE_FOREACH (World *, wo, &bmain->materials) {
+        LISTBASE_FOREACH (World *, wo, &bmain->worlds) {
           if (wo->nodetree && wo->use_nodes && ntreeHasTree(wo->nodetree, ntree)) {
             GPU_material_free(&wo->gpumaterial);
           }
@@ -1127,10 +1128,15 @@ static bool cursor_isect_multi_input_socket(const float cursor[2], const bNodeSo
 {
   const float node_socket_height = node_socket_calculate_height(socket);
   const rctf multi_socket_rect = {
-      .xmin = socket->locx - NODE_SOCKSIZE * 4,
-      .xmax = socket->locx + NODE_SOCKSIZE,
-      .ymin = socket->locy - node_socket_height * 0.5 - NODE_SOCKSIZE * 2.0f,
-      .ymax = socket->locy + node_socket_height * 0.5 + NODE_SOCKSIZE * 2.0f,
+      .xmin = socket->locx - NODE_SOCKSIZE * 4.0f,
+      .xmax = socket->locx + NODE_SOCKSIZE * 2.0f,
+      /*.xmax = socket->locx + NODE_SOCKSIZE * 5.5f
+       * would be the same behavior as for regular sockets.
+       * But keep it smaller because for multi-input socket you
+       * sometimes want to drag the link to the other side, if you may
+       * accidentally pick the wrong link otherwise. */
+      .ymin = socket->locy - node_socket_height * 0.5 - NODE_SOCKSIZE,
+      .ymax = socket->locy + node_socket_height * 0.5 + NODE_SOCKSIZE,
   };
   if (BLI_rctf_isect_pt(&multi_socket_rect, cursor[0], cursor[1])) {
     return true;
@@ -1140,7 +1146,7 @@ static bool cursor_isect_multi_input_socket(const float cursor[2], const bNodeSo
 
 /* type is SOCK_IN and/or SOCK_OUT */
 int node_find_indicated_socket(
-    SpaceNode *snode, bNode **nodep, bNodeSocket **sockp, float cursor[2], int in_out)
+    SpaceNode *snode, bNode **nodep, bNodeSocket **sockp, const float cursor[2], int in_out)
 {
   rctf rect;
 
@@ -1403,8 +1409,12 @@ static int node_read_viewlayers_exec(bContext *C, wmOperator *UNUSED(op))
   }
 
   LISTBASE_FOREACH (bNode *, node, &snode->edittree->nodes) {
-    if (node->type == CMP_NODE_R_LAYERS) {
+    if ((node->type == CMP_NODE_R_LAYERS) ||
+        (node->type == CMP_NODE_CRYPTOMATTE && node->custom1 == CMP_CRYPTOMATTE_SRC_RENDER)) {
       ID *id = node->id;
+      if (id == NULL) {
+        continue;
+      }
       if (id->tag & LIB_TAG_DOIT) {
         RE_ReadRenderResult(curscene, (Scene *)id);
         ntreeCompositTagRender((Scene *)id);
@@ -2231,10 +2241,13 @@ static int node_clipboard_paste_exec(bContext *C, wmOperator *op)
                 link->tosock->new_sock);
   }
 
-  ntreeUpdateTree(CTX_data_main(C), snode->edittree);
+  Main *bmain = CTX_data_main(C);
+  ntreeUpdateTree(bmain, snode->edittree);
 
   snode_notify(C, snode);
   snode_dag_update(C, snode);
+  /* Pasting nodes can create arbitrary new relations, because nodes can reference IDs. */
+  DEG_relations_tag_update(bmain);
 
   return OPERATOR_FINISHED;
 }
@@ -2738,7 +2751,7 @@ static int node_cryptomatte_add_socket_exec(bContext *C, wmOperator *UNUSED(op))
     node = nodeGetActive(snode->edittree);
   }
 
-  if (!node || node->type != CMP_NODE_CRYPTOMATTE) {
+  if (!node || node->type != CMP_NODE_CRYPTOMATTE_LEGACY) {
     return OPERATOR_CANCELLED;
   }
 
@@ -2782,7 +2795,7 @@ static int node_cryptomatte_remove_socket_exec(bContext *C, wmOperator *UNUSED(o
     node = nodeGetActive(snode->edittree);
   }
 
-  if (!node || node->type != CMP_NODE_CRYPTOMATTE) {
+  if (!node || node->type != CMP_NODE_CRYPTOMATTE_LEGACY) {
     return OPERATOR_CANCELLED;
   }
 

@@ -403,6 +403,7 @@ IDTypeInfo IDType_ID_BR = {
     .make_local = brush_make_local,
     .foreach_id = brush_foreach_id,
     .foreach_cache = NULL,
+    .owner_get = NULL,
 
     .blend_write = brush_blend_write,
     .blend_read_data = brush_blend_read_data,
@@ -573,8 +574,8 @@ bool BKE_brush_delete(Main *bmain, Brush *brush)
   if (brush->id.tag & LIB_TAG_INDIRECT) {
     return false;
   }
-  if (BKE_library_ID_is_indirectly_used(bmain, brush) && ID_REAL_USERS(brush) <= 1 &&
-      ID_EXTRA_USERS(brush) == 0) {
+  if (ID_REAL_USERS(brush) <= 1 && ID_EXTRA_USERS(brush) == 0 &&
+      BKE_library_ID_is_indirectly_used(bmain, brush)) {
     return false;
   }
 

@@ -192,6 +192,7 @@ set(SRC
   BLI_float3.hh
   BLI_float4x4.hh
   BLI_fnmatch.h
+  BLI_function_ref.hh
   BLI_ghash.h
   BLI_gsqueue.h
   BLI_hash.h
@@ -262,6 +263,7 @@ set(SRC
   BLI_session_uuid.h
   BLI_set.hh
   BLI_set_slots.hh
+  BLI_simd.h
   BLI_smallhash.h
   BLI_sort.h
   BLI_sort_utils.h
@@ -295,6 +297,8 @@ set(SRC
   BLI_vector_set.hh
   BLI_vector_set_slots.hh
   BLI_vfontdata.h
+  BLI_virtual_array.hh
+  BLI_virtual_vector_array.hh
   BLI_voronoi_2d.h
   BLI_voxel.h
   BLI_winstuff.h
@@ -388,6 +392,7 @@ if(WITH_GTESTS)
     tests/BLI_disjoint_set_test.cc
     tests/BLI_edgehash_test.cc
     tests/BLI_expr_pylike_eval_test.cc
+    tests/BLI_function_ref_test.cc
     tests/BLI_ghash_test.cc
     tests/BLI_hash_mm2a_test.cc
     tests/BLI_heap_simple_test.cc
@@ -430,6 +435,7 @@ if(WITH_GTESTS)
     tests/BLI_task_test.cc
     tests/BLI_vector_set_test.cc
     tests/BLI_vector_test.cc
+    tests/BLI_virtual_array_test.cc
 
     tests/BLI_exception_safety_test_utils.hh
   )

@@ -25,7 +25,7 @@ NodeTreeRef::NodeTreeRef(bNodeTree *btree) : btree_(btree)
   Map<bNode *, NodeRef *> node_mapping;
 
   LISTBASE_FOREACH (bNode *, bnode, &btree->nodes) {
-    NodeRef &node = *allocator_.construct<NodeRef>();
+    NodeRef &node = *allocator_.construct<NodeRef>().release();
 
     node.tree_ = this;
     node.bnode_ = bnode;
@@ -33,7 +33,7 @@ NodeTreeRef::NodeTreeRef(bNodeTree *btree) : btree_(btree)
     RNA_pointer_create(&btree->id, &RNA_Node, bnode, &node.rna_);
 
     LISTBASE_FOREACH (bNodeSocket *, bsocket, &bnode->inputs) {
-      InputSocketRef &socket = *allocator_.construct<InputSocketRef>();
+      InputSocketRef &socket = *allocator_.construct<InputSocketRef>().release();
       socket.node_ = &node;
       socket.index_ = node.inputs_.append_and_get_index(&socket);
       socket.is_input_ = true;
@@ -43,13 +43,31 @@ NodeTreeRef::NodeTreeRef(bNodeTree *btree) : btree_(btree)
     }
 
     LISTBASE_FOREACH (bNodeSocket *, bsocket, &bnode->outputs) {
-      OutputSocketRef &socket = *allocator_.construct<OutputSocketRef>();
+      OutputSocketRef &socket = *allocator_.construct<OutputSocketRef>().release();
       socket.node_ = &node;
       socket.index_ = node.outputs_.append_and_get_index(&socket);
       socket.is_input_ = false;
       socket.bsocket_ = bsocket;
       socket.id_ = sockets_by_id_.append_and_get_index(&socket);
       RNA_pointer_create(&btree->id, &RNA_NodeSocket, bsocket, &socket.rna_);
+    }
+
+    LISTBASE_FOREACH (bNodeLink *, blink, &bnode->internal_links) {
+      InternalLinkRef &internal_link = *allocator_.construct<InternalLinkRef>().release();
+      internal_link.blink_ = blink;
+      for (InputSocketRef *socket_ref : node.inputs_) {
+        if (socket_ref->bsocket_ == blink->fromsock) {
+          internal_link.from_ = socket_ref;
+          break;
+        }
+      }
+      for (OutputSocketRef *socket_ref : node.outputs_) {
+        if (socket_ref->bsocket_ == blink->tosock) {
+          internal_link.to_ = socket_ref;
+          break;
+        }
+      }
+      node.internal_links_.append(&internal_link);
     }
 
     input_sockets_.extend(node.inputs_.as_span());
@@ -64,18 +82,30 @@ NodeTreeRef::NodeTreeRef(bNodeTree *btree) : btree_(btree)
     InputSocketRef &to_socket = this->find_input_socket(
         node_mapping, blink->tonode, blink->tosock);
 
-    from_socket.directly_linked_sockets_.append(&to_socket);
-    to_socket.directly_linked_sockets_.append(&from_socket);
+    LinkRef &link = *allocator_.construct<LinkRef>().release();
+    link.from_ = &from_socket;
+    link.to_ = &to_socket;
+    link.blink_ = blink;
+
+    links_.append(&link);
+
+    from_socket.directly_linked_links_.append(&link);
+    to_socket.directly_linked_links_.append(&link);
   }
 
-  for (OutputSocketRef *socket : output_sockets_) {
-    if (!socket->node_->is_reroute_node()) {
-      this->find_targets_skipping_reroutes(*socket, socket->linked_sockets_);
-      for (SocketRef *target : socket->linked_sockets_) {
-        target->linked_sockets_.append(socket);
-      }
+  for (InputSocketRef *input_socket : input_sockets_) {
+    if (input_socket->is_multi_input_socket()) {
+      std::sort(input_socket->directly_linked_links_.begin(),
+                input_socket->directly_linked_links_.end(),
+                [&](const LinkRef *a, const LinkRef *b) -> bool {
+                  int index_a = a->blink()->multi_input_socket_index;
+                  int index_b = b->blink()->multi_input_socket_index;
+                  return index_a > index_b;
+                });
     }
   }
+
+  this->create_linked_socket_caches();
 
   for (NodeRef *node : nodes_by_id_) {
     const bNodeType *nodetype = node->bnode_->typeinfo;
@@ -85,6 +115,8 @@ NodeTreeRef::NodeTreeRef(bNodeTree *btree) : btree_(btree)
 
 NodeTreeRef::~NodeTreeRef()
 {
+  /* The destructor has to be called manually, because these types are allocated in a linear
+   * allocator. */
   for (NodeRef *node : nodes_by_id_) {
     node->~NodeRef();
   }
@@ -93,6 +125,9 @@ NodeTreeRef::~NodeTreeRef()
   }
   for (OutputSocketRef *socket : output_sockets_) {
     socket->~OutputSocketRef();
+  }
+  for (LinkRef *link : links_) {
+    link->~LinkRef();
   }
 }
 
@@ -106,7 +141,7 @@ InputSocketRef &NodeTreeRef::find_input_socket(Map<bNode *, NodeRef *> &node_map
       return *socket;
     }
   }
-  BLI_assert(false);
+  BLI_assert_unreachable();
   return *node->inputs_[0];
 }
 
@@ -120,19 +155,109 @@ OutputSocketRef &NodeTreeRef::find_output_socket(Map<bNode *, NodeRef *> &node_m
       return *socket;
     }
   }
-  BLI_assert(false);
+  BLI_assert_unreachable();
   return *node->outputs_[0];
 }
 
-void NodeTreeRef::find_targets_skipping_reroutes(OutputSocketRef &socket,
-                                                 Vector<SocketRef *> &r_targets)
+void NodeTreeRef::create_linked_socket_caches()
 {
-  for (SocketRef *direct_target : socket.directly_linked_sockets_) {
-    if (direct_target->node_->is_reroute_node()) {
-      this->find_targets_skipping_reroutes(*direct_target->node_->outputs_[0], r_targets);
+  for (InputSocketRef *socket : input_sockets_) {
+    /* Find directly linked socket based on incident links. */
+    Vector<SocketRef *> directly_linked_sockets;
+    for (LinkRef *link : socket->directly_linked_links_) {
+      directly_linked_sockets.append(link->from_);
+    }
+    socket->directly_linked_sockets_ = allocator_.construct_array_copy(
+        directly_linked_sockets.as_span());
+
+    /* Find logically linked sockets. */
+    Vector<SocketRef *> logically_linked_sockets;
+    this->foreach_logical_origin(
+        *socket, [&](OutputSocketRef &origin) { logically_linked_sockets.append(&origin); });
+    if (logically_linked_sockets == directly_linked_sockets) {
+      socket->logically_linked_sockets_ = socket->directly_linked_sockets_;
     }
     else {
-      r_targets.append_non_duplicates(direct_target);
+      socket->logically_linked_sockets_ = allocator_.construct_array_copy(
+          logically_linked_sockets.as_span());
+    }
+  }
+
+  for (OutputSocketRef *socket : output_sockets_) {
+    /* Find directly linked socket based on incident links. */
+    Vector<SocketRef *> directly_linked_sockets;
+    for (LinkRef *link : socket->directly_linked_links_) {
+      directly_linked_sockets.append(link->to_);
+    }
+    socket->directly_linked_sockets_ = allocator_.construct_array_copy(
+        directly_linked_sockets.as_span());
+
+    /* Find logically linked sockets. */
+    Vector<SocketRef *> logically_linked_sockets;
+    this->foreach_logical_target(
+        *socket, [&](InputSocketRef &target) { logically_linked_sockets.append(&target); });
+    if (logically_linked_sockets == directly_linked_sockets) {
+      socket->logically_linked_sockets_ = socket->directly_linked_sockets_;
+    }
+    else {
+      socket->logically_linked_sockets_ = allocator_.construct_array_copy(
+          logically_linked_sockets.as_span());
+    }
+  }
+}
+
+void NodeTreeRef::foreach_logical_origin(InputSocketRef &socket,
+                                         FunctionRef<void(OutputSocketRef &)> callback,
+                                         bool only_follow_first_input_link)
+{
+  Span<LinkRef *> links_to_check = socket.directly_linked_links_;
+  if (only_follow_first_input_link) {
+    links_to_check = links_to_check.take_front(1);
+  }
+  for (LinkRef *link : links_to_check) {
+    if (link->is_muted()) {
+      continue;
+    }
+    OutputSocketRef *origin = link->from_;
+    NodeRef *origin_node = origin->node_;
+    if (origin_node->is_reroute_node()) {
+      this->foreach_logical_origin(*origin_node->inputs_[0], callback, false);
+    }
+    else if (origin_node->is_muted()) {
+      for (InternalLinkRef *internal_link : origin_node->internal_links_) {
+        if (internal_link->to_ == origin) {
+          this->foreach_logical_origin(*internal_link->from_, callback, true);
+          break;
+        }
+      }
+    }
+    else {
+      callback(*origin);
+    }
+  }
+}
+
+void NodeTreeRef::foreach_logical_target(OutputSocketRef &socket,
+                                         FunctionRef<void(InputSocketRef &)> callback)
+{
+  for (LinkRef *link : socket.directly_linked_links_) {
+    if (link->is_muted()) {
+      continue;
+    }
+    InputSocketRef *target = link->to_;
+    NodeRef *target_node = target->node_;
+    if (target_node->is_reroute_node()) {
+      this->foreach_logical_target(*target_node->outputs_[0], callback);
+    }
+    else if (target_node->is_muted()) {
+      for (InternalLinkRef *internal_link : target_node->internal_links_) {
+        if (internal_link->from_ == target) {
+          this->foreach_logical_target(*internal_link->to_, callback);
+        }
+      }
+    }
+    else {
+      callback(*target);
     }
   }
 }
@@ -214,6 +339,12 @@ std::string NodeTreeRef::to_dot() const
   }
 
   return digraph.to_dot_string();
+}
+
+const NodeTreeRef &get_tree_ref_from_map(NodeTreeRefMap &node_tree_refs, bNodeTree &btree)
+{
+  return *node_tree_refs.lookup_or_add_cb(&btree,
+                                          [&]() { return std::make_unique<NodeTreeRef>(&btree); });
 }
 
 }  // namespace blender::nodes

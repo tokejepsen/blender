@@ -69,6 +69,7 @@ set(SRC
   intern/CCGSubSurf_util.c
   intern/DerivedMesh.cc
   intern/action.c
+  intern/action_mirror.c
   intern/addon.c
   intern/anim_data.c
   intern/anim_path.c
@@ -77,6 +78,7 @@ set(SRC
   intern/appdir.c
   intern/armature.c
   intern/armature_deform.c
+  intern/armature_pose.cc
   intern/armature_update.c
   intern/asset.cc
   intern/attribute.c
@@ -125,11 +127,16 @@ set(SRC
   intern/editmesh_tangent.c
   intern/effect.c
   intern/fcurve.c
+  intern/fcurve_cache.c
   intern/fcurve_driver.c
   intern/fluid.c
   intern/fmodifier.c
   intern/font.c
   intern/freestyle.c
+  intern/geometry_component_instances.cc
+  intern/geometry_component_mesh.cc
+  intern/geometry_component_pointcloud.cc
+  intern/geometry_component_volume.cc
   intern/geometry_set.cc
   intern/geometry_set_instances.cc
   intern/gpencil.c
@@ -172,6 +179,7 @@ set(SRC
   intern/mball.c
   intern/mball_tessellate.c
   intern/mesh.c
+  intern/mesh_boolean_convert.cc
   intern/mesh_convert.c
   intern/mesh_evaluate.c
   intern/mesh_fair.cc
@@ -363,6 +371,7 @@ set(SRC
   BKE_mball.h
   BKE_mball_tessellate.h
   BKE_mesh.h
+  BKE_mesh_boolean_convert.h
   BKE_mesh_fair.h
   BKE_mesh_iterators.h
   BKE_mesh_mapping.h
@@ -378,6 +387,7 @@ set(SRC
   BKE_multires.h
   BKE_nla.h
   BKE_node.h
+  BKE_node_ui_storage.hh
   BKE_object.h
   BKE_object_deform.h
   BKE_object_facemap.h
@@ -430,6 +440,7 @@ set(SRC
   intern/CCGSubSurf.h
   intern/CCGSubSurf_inline.h
   intern/CCGSubSurf_intern.h
+  intern/attribute_access_intern.hh
   intern/data_transfer_intern.h
   intern/lib_intern.h
   intern/multires_inline.h
@@ -725,6 +736,14 @@ if(WITH_TBB)
 
   list(APPEND LIB
     ${TBB_LIBRARIES}
+  )
+endif()
+
+if(WITH_GMP)
+  add_definitions(-DWITH_GMP)
+
+  list(APPEND INC_SYS
+    ${GMP_INCLUDE_DIRS}
   )
 endif()
 

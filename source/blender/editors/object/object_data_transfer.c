@@ -615,7 +615,7 @@ void OBJECT_OT_data_transfer(wmOperatorType *ot)
   ot->name = "Transfer Mesh Data";
   ot->idname = "OBJECT_OT_data_transfer";
   ot->description =
-      "Transfer data layer(s) (weights, edge sharp, ...) from active to selected meshes";
+      "Transfer data layer(s) (weights, edge sharp, etc.) from active to selected meshes";
 
   /* API callbacks.*/
   ot->poll = data_transfer_poll;
@@ -684,7 +684,8 @@ void OBJECT_OT_data_transfer(wmOperatorType *ot)
       false,
       "Auto Transform",
       "Automatically compute transformation to get the best possible match between source and "
-      "destination meshes (WARNING: results will never be as good as manual matching of objects)");
+      "destination meshes.\n"
+      "Warning: Results will never be as good as manual matching of objects");
   RNA_def_boolean(ot->srna,
                   "use_object_transform",
                   true,

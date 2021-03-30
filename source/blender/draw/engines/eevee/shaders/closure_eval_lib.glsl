@@ -187,14 +187,15 @@ struct ClosureEvalCommon {
   float specular_accum;
   /** Diffuse probe accumulator. */
   float diffuse_accum;
-  /** Viewspace depth to start raytracing from. */
-  float tracing_depth;
 };
 
 /* Common cl_out struct used by most closures. */
 struct ClosureOutput {
   vec3 radiance;
 };
+
+/* Workaround for screenspace shadows in SSR pass. */
+float FragDepth;
 
 ClosureEvalCommon closure_Common_eval_init(ClosureInputCommon cl_in)
 {
@@ -207,14 +208,6 @@ ClosureEvalCommon closure_Common_eval_init(ClosureInputCommon cl_in)
   cl_eval.vP = viewPosition;
   cl_eval.Ng = safe_normalize(cross(dFdx(cl_eval.P), dFdy(cl_eval.P)));
   cl_eval.vNg = transform_direction(ViewMatrix, cl_eval.Ng);
-  /* TODO(fclem) See if we can avoid this complicated setup. */
-  cl_eval.tracing_depth = gl_FragCoord.z;
-  /* Constant bias (due to depth buffer precision) */
-  /* Magic numbers for 24bits of precision.
-   * From http://terathon.com/gdc07_lengyel.pdf (slide 26) */
-  cl_eval.tracing_depth -= mix(2.4e-7, 4.8e-7, gl_FragCoord.z);
-  /* Convert to view Z. */
-  cl_eval.tracing_depth = get_view_z_from_depth(cl_eval.tracing_depth);
 
   cl_eval.occlusion_data = occlusion_load(cl_eval.vP, cl_in.occlusion);
 
@@ -247,13 +240,8 @@ ClosureLightData closure_light_eval_init(ClosureEvalCommon cl_common, int light_
   light.L.w = length(light.L.xyz);
 
   light.vis = light_visibility(light.data, cl_common.P, light.L);
-  light.contact_shadow = light_contact_shadows(light.data,
-                                               cl_common.P,
-                                               cl_common.vP,
-                                               cl_common.tracing_depth,
-                                               cl_common.vNg,
-                                               cl_common.rand.x,
-                                               light.vis);
+  light.contact_shadow = light_contact_shadows(
+      light.data, cl_common.P, cl_common.vP, cl_common.vNg, cl_common.rand.x, light.vis);
 
   return light;
 }

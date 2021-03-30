@@ -853,7 +853,7 @@ static BMElem *edbm_add_edge_face_exec__tricky_extend_sel(BMesh *bm)
 }
 static void edbm_add_edge_face_exec__tricky_finalize_sel(BMesh *bm, BMElem *ele_desel, BMFace *f)
 {
-  /* now we need to find the edge that isnt connected to this element */
+  /* Now we need to find the edge that isn't connected to this element. */
   BM_select_history_clear(bm);
 
   /* Notes on hidden geometry:
@@ -896,7 +896,7 @@ static void edbm_add_edge_face_exec__tricky_finalize_sel(BMesh *bm, BMElem *ele_
 
 static int edbm_add_edge_face_exec(bContext *C, wmOperator *op)
 {
-  /* when this is used to dissolve we could avoid this, but checking isnt too slow */
+  /* When this is used to dissolve we could avoid this, but checking isn't too slow. */
   bool changed_multi = false;
   ViewLayer *view_layer = CTX_data_view_layer(C);
   uint objects_len = 0;
@@ -1967,9 +1967,9 @@ static int edbm_duplicate_exec(bContext *C, wmOperator *op)
 
 static int edbm_duplicate_invoke(bContext *C, wmOperator *op, const wmEvent *UNUSED(event))
 {
-  WM_cursor_wait(1);
+  WM_cursor_wait(true);
   edbm_duplicate_exec(C, op);
-  WM_cursor_wait(0);
+  WM_cursor_wait(false);
 
   return OPERATOR_FINISHED;
 }
@@ -3261,11 +3261,11 @@ static int edbm_merge_exec(bContext *C, wmOperator *op)
 }
 
 static const EnumPropertyItem merge_type_items[] = {
-    {MESH_MERGE_FIRST, "FIRST", 0, "At First", ""},
-    {MESH_MERGE_LAST, "LAST", 0, "At Last", ""},
     {MESH_MERGE_CENTER, "CENTER", 0, "At Center", ""},
     {MESH_MERGE_CURSOR, "CURSOR", 0, "At Cursor", ""},
     {MESH_MERGE_COLLAPSE, "COLLAPSE", 0, "Collapse", ""},
+    {MESH_MERGE_FIRST, "FIRST", 0, "At First", ""},
+    {MESH_MERGE_LAST, "LAST", 0, "At Last", ""},
     {0, NULL, 0, NULL, NULL},
 };
 
@@ -3283,6 +3283,11 @@ static const EnumPropertyItem *merge_type_itemf(bContext *C,
     EnumPropertyItem *item = NULL;
     int totitem = 0;
     BMEditMesh *em = BKE_editmesh_from_object(obedit);
+
+    /* Keep these first so that their automatic shortcuts don't change. */
+    RNA_enum_items_add_value(&item, &totitem, merge_type_items, MESH_MERGE_CENTER);
+    RNA_enum_items_add_value(&item, &totitem, merge_type_items, MESH_MERGE_CURSOR);
+    RNA_enum_items_add_value(&item, &totitem, merge_type_items, MESH_MERGE_COLLAPSE);
 
     /* Only active object supported:
      * In practice it doesn't make sense to run this operation on non-active meshes
@@ -3305,9 +3310,6 @@ static const EnumPropertyItem *merge_type_itemf(bContext *C,
       }
     }
 
-    RNA_enum_items_add_value(&item, &totitem, merge_type_items, MESH_MERGE_CENTER);
-    RNA_enum_items_add_value(&item, &totitem, merge_type_items, MESH_MERGE_CURSOR);
-    RNA_enum_items_add_value(&item, &totitem, merge_type_items, MESH_MERGE_COLLAPSE);
     RNA_enum_item_end(&item, &totitem);
 
     *r_free = true;
@@ -4170,15 +4172,7 @@ static Base *mesh_separate_tagged(
                                  }));
   BM_mesh_elem_toolflags_ensure(bm_new); /* needed for 'duplicate' bmo */
 
-  CustomData_copy(&bm_old->vdata, &bm_new->vdata, CD_MASK_BMESH.vmask, CD_CALLOC, 0);
-  CustomData_copy(&bm_old->edata, &bm_new->edata, CD_MASK_BMESH.emask, CD_CALLOC, 0);
-  CustomData_copy(&bm_old->ldata, &bm_new->ldata, CD_MASK_BMESH.lmask, CD_CALLOC, 0);
-  CustomData_copy(&bm_old->pdata, &bm_new->pdata, CD_MASK_BMESH.pmask, CD_CALLOC, 0);
-
-  CustomData_bmesh_init_pool(&bm_new->vdata, bm_mesh_allocsize_default.totvert, BM_VERT);
-  CustomData_bmesh_init_pool(&bm_new->edata, bm_mesh_allocsize_default.totedge, BM_EDGE);
-  CustomData_bmesh_init_pool(&bm_new->ldata, bm_mesh_allocsize_default.totloop, BM_LOOP);
-  CustomData_bmesh_init_pool(&bm_new->pdata, bm_mesh_allocsize_default.totface, BM_FACE);
+  BM_mesh_copy_init_customdata(bm_new, bm_old, &bm_mesh_allocsize_default);
 
   /* Take into account user preferences for duplicating actions. */
   const eDupli_ID_Flags dupflag = USER_DUP_MESH | (U.dupflag & USER_DUP_ACT);
@@ -4821,11 +4815,11 @@ static bool edbm_fill_grid_prepare(BMesh *bm, int offset, int *span_p, const boo
 
     if (span_calc) {
       /* calculate the span by finding the next corner in 'verts'
-       * we dont know what defines a corner exactly so find the 4 verts
+       * we don't know what defines a corner exactly so find the 4 verts
        * in the loop with the greatest angle.
        * Tag them and use the first tagged vertex to calculate the span.
        *
-       * note: we may have already checked 'edbm_fill_grid_vert_tag_angle()' on each
+       * NOTE: we may have already checked 'edbm_fill_grid_vert_tag_angle()' on each
        * vert, but advantage of de-duplicating is minimal. */
       struct SortPtrByFloat *ele_sort = MEM_mallocN(sizeof(*ele_sort) * verts_len, __func__);
       LinkData *v_link;
@@ -6887,13 +6881,13 @@ void MESH_OT_sort_elements(wmOperatorType *ot)
        "MATERIAL",
        0,
        "Material",
-       "Sort selected elements from smallest to greatest material index (faces only!)"},
+       "Sort selected faces from smallest to greatest material index"},
       {SRT_SELECTED,
        "SELECTED",
        0,
        "Selected",
-       "Move all selected elements in first places, preserving their relative order "
-       "(WARNING: this will affect unselected elements' indices as well!)"},
+       "Move all selected elements in first places, preserving their relative order.\n"
+       "Warning: This will affect unselected elements' indices as well"},
       {SRT_RANDOMIZE, "RANDOMIZE", 0, "Randomize", "Randomize order of selected elements"},
       {SRT_REVERSE, "REVERSE", 0, "Reverse", "Reverse current order of selected elements"},
       {0, NULL, 0, NULL, NULL},
@@ -7752,7 +7746,7 @@ void MESH_OT_symmetry_snap(struct wmOperatorType *ot)
 
 /** \} */
 
-#ifdef WITH_FREESTYLE
+#if defined(WITH_FREESTYLE)
 
 /* -------------------------------------------------------------------- */
 /** \name Mark Edge (Freestyle) Operator
